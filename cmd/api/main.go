@@ -12,6 +12,7 @@ import (
 
 	"deps-api/internal/config"
 	"deps-api/internal/db"
+	"deps-api/internal/handler"
 	"deps-api/internal/logger"
 )
 
@@ -26,7 +27,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	_ = database // TODO: pass to route handlers
+	handler.Register(mux, database)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.ServerPort,
