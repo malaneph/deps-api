@@ -3,6 +3,7 @@ package department
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -10,10 +11,12 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("department not found")
-	ErrMaxDepth      = errors.New("max department depth of 5 exceeded")
-	ErrDuplicateName = errors.New("department name already exists among siblings")
-	ErrSelfParent    = errors.New("department cannot be its own parent")
+	ErrNotFound              = errors.New("department not found")
+	ErrMaxDepth              = errors.New("max department depth of 5 exceeded")
+	ErrDuplicateName         = errors.New("department name already exists among siblings")
+	ErrSelfParent            = errors.New("department cannot be its own parent")
+	ErrReassignTargetInvalid = errors.New("reassign target department not found")
+	ErrSelfReassign          = errors.New("cannot reassign employees to the same department")
 )
 
 type Service struct {
@@ -147,10 +150,71 @@ func (s *Service) Update(id uint, input UpdateInput) (*model.Department, error) 
 	return dept, nil
 }
 
-func (s *Service) Delete(id uint) error {
+func (s *Service) ListEmployees(departmentID uint) ([]model.Employee, error) {
+	if _, err := s.GetByID(departmentID, 0); err != nil {
+		return nil, err
+	}
+	var employees []model.Employee
+	if err := s.db.Where("department_id = ?", departmentID).Order("created_at ASC, fullname ASC").Find(&employees).Error; err != nil {
+		return nil, fmt.Errorf("list employees for department %d: %w", departmentID, err)
+	}
+	return employees, nil
+}
+
+type EmployeeCreateInput struct {
+	Fullname string
+	Position string
+	HiredAt  *time.Time
+}
+
+func (s *Service) CreateEmployee(departmentID uint, input EmployeeCreateInput) (*model.Employee, error) {
+	if _, err := s.GetByID(departmentID, 0); err != nil {
+		return nil, err
+	}
+	emp := model.Employee{
+		DepartmentID: departmentID,
+		Fullname:     input.Fullname,
+		Position:     input.Position,
+		HiredAt:      input.HiredAt,
+	}
+	if err := s.db.Create(&emp).Error; err != nil {
+		return nil, fmt.Errorf("create employee: %w", err)
+	}
+	return &emp, nil
+}
+
+type DeleteInput struct {
+	ReassignTo *uint
+}
+
+func (s *Service) Delete(id uint, input DeleteInput) error {
 	if _, err := s.GetByID(id, 0); err != nil {
 		return err
 	}
+
+	if input.ReassignTo != nil {
+		if *input.ReassignTo == id {
+			return ErrSelfReassign
+		}
+		if _, err := s.GetByID(*input.ReassignTo, 0); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return ErrReassignTargetInvalid
+			}
+			return err
+		}
+		return s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&model.Employee{}).
+				Where("department_id = ?", id).
+				Update("department_id", *input.ReassignTo).Error; err != nil {
+				return fmt.Errorf("reassign employees: %w", err)
+			}
+			if err := tx.Delete(&model.Department{}, id).Error; err != nil {
+				return fmt.Errorf("delete department: %w", err)
+			}
+			return nil
+		})
+	}
+
 	if err := s.db.Delete(&model.Department{}, id).Error; err != nil {
 		return fmt.Errorf("delete department: %w", err)
 	}

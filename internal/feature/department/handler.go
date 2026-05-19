@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -26,6 +27,7 @@ func Register(mux *http.ServeMux, db *gorm.DB) {
 	mux.HandleFunc("POST /departments", h.Create)
 	mux.HandleFunc("PATCH /departments/{id}", h.Update)
 	mux.HandleFunc("DELETE /departments/{id}", h.Delete)
+	mux.HandleFunc("POST /departments/{id}/employees", h.CreateEmployee)
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +61,16 @@ func (h *Handler) GetByID(w http.ResponseWriter, r *http.Request) {
 		api.HandleError(w, r, mapErr(err))
 		return
 	}
+
+	if r.URL.Query().Get("include_employees") == "true" {
+		employees, err := h.svc.ListEmployees(id)
+		if err != nil {
+			api.HandleError(w, r, mapErr(err))
+			return
+		}
+		dept.Employees = employees
+	}
+
 	api.JSON(w, http.StatusOK, dept)
 }
 
@@ -128,6 +140,47 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	api.JSON(w, http.StatusOK, dept)
 }
 
+func (h *Handler) CreateEmployee(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		api.HandleError(w, r, err)
+		return
+	}
+
+	var req struct {
+		Fullname string     `json:"full_name"`
+		Position string     `json:"position"`
+		HiredAt  *time.Time `json:"hired_at"`
+	}
+	if err := api.Decode(w, r, &req); err != nil {
+		api.HandleError(w, r, err)
+		return
+	}
+
+	req.Fullname = strings.TrimSpace(req.Fullname)
+	req.Position = strings.TrimSpace(req.Position)
+
+	if req.Fullname == "" {
+		api.HandleError(w, r, api.ErrBadRequest("full_name is required"))
+		return
+	}
+	if req.Position == "" {
+		api.HandleError(w, r, api.ErrBadRequest("position is required"))
+		return
+	}
+
+	emp, err := h.svc.CreateEmployee(id, EmployeeCreateInput{
+		Fullname: req.Fullname,
+		Position: req.Position,
+		HiredAt:  req.HiredAt,
+	})
+	if err != nil {
+		api.HandleError(w, r, mapErr(err))
+		return
+	}
+	api.JSON(w, http.StatusCreated, emp)
+}
+
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -135,7 +188,23 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.Delete(id); err != nil {
+	var input DeleteInput
+	if r.URL.Query().Get("mode") == "reassign" {
+		raw := r.URL.Query().Get("reassign_to_department_id")
+		if raw == "" {
+			api.HandleError(w, r, api.ErrBadRequest("reassign_to_department_id is required when mode=reassign"))
+			return
+		}
+		targetID, parseErr := strconv.ParseUint(raw, 10, 64)
+		if parseErr != nil || targetID == 0 {
+			api.HandleError(w, r, api.ErrBadRequest("reassign_to_department_id must be a positive integer"))
+			return
+		}
+		t := uint(targetID)
+		input.ReassignTo = &t
+	}
+
+	if err := h.svc.Delete(id, input); err != nil {
 		api.HandleError(w, r, mapErr(err))
 		return
 	}
@@ -152,6 +221,10 @@ func mapErr(err error) error {
 		return api.ErrConflict("department name already exists in this parent")
 	case errors.Is(err, ErrSelfParent):
 		return api.ErrBadRequest("department cannot be its own parent")
+	case errors.Is(err, ErrReassignTargetInvalid):
+		return api.ErrNotFound("reassign target department not found")
+	case errors.Is(err, ErrSelfReassign):
+		return api.ErrBadRequest("cannot reassign employees to the same department")
 	default:
 		return err
 	}
