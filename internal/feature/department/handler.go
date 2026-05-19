@@ -221,6 +221,8 @@ func mapErr(err error) error {
 		return api.ErrConflict("department name already exists in this parent")
 	case errors.Is(err, ErrSelfParent):
 		return api.ErrBadRequest("department cannot be its own parent")
+	case errors.Is(err, ErrCircularParent):
+		return api.ErrBadRequest("department cannot be moved into its own subtree")
 	case errors.Is(err, ErrReassignTargetInvalid):
 		return api.ErrNotFound("reassign target department not found")
 	case errors.Is(err, ErrSelfReassign):

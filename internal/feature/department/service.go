@@ -15,6 +15,7 @@ var (
 	ErrMaxDepth              = errors.New("max department depth of 5 exceeded")
 	ErrDuplicateName         = errors.New("department name already exists among siblings")
 	ErrSelfParent            = errors.New("department cannot be its own parent")
+	ErrCircularParent        = errors.New("department cannot be moved into its own subtree")
 	ErrReassignTargetInvalid = errors.New("reassign target department not found")
 	ErrSelfReassign          = errors.New("cannot reassign employees to the same department")
 )
@@ -120,6 +121,13 @@ func (s *Service) Update(id uint, input UpdateInput) (*model.Department, error) 
 			if *input.ParentID == id {
 				return nil, ErrSelfParent
 			}
+			isDesc, err := s.isDescendant(id, *input.ParentID)
+			if err != nil {
+				return nil, err
+			}
+			if isDesc {
+				return nil, ErrCircularParent
+			}
 			parent, err := s.GetByID(*input.ParentID, 0)
 			if err != nil {
 				return nil, err
@@ -219,6 +227,22 @@ func (s *Service) Delete(id uint, input DeleteInput) error {
 		return fmt.Errorf("delete department: %w", err)
 	}
 	return nil
+}
+
+func (s *Service) isDescendant(ancestorID, candidateID uint) (bool, error) {
+	var children []model.Department
+	if err := s.db.Select("id").Where("parent_id = ?", ancestorID).Find(&children).Error; err != nil {
+		return false, fmt.Errorf("check descendants of %d: %w", ancestorID, err)
+	}
+	for _, child := range children {
+		if child.ID == candidateID {
+			return true, nil
+		}
+		if desc, err := s.isDescendant(child.ID, candidateID); err != nil || desc {
+			return desc, err
+		}
+	}
+	return false, nil
 }
 
 func updateDescendantDepths(tx *gorm.DB, parentID uint, parentDepth int) error {
